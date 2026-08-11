@@ -1,13 +1,18 @@
+import os
+import time
+import requests
 import pandas as pd
 import numpy as pd_np
 import numpy as np
-import yfinance as yf
 import logging
 from typing import List, Dict, Any
+from datetime import datetime, timedelta, timezone
 from src.nlp_engine import CatalystType
 from src.rag_store import query_catalyst_history
 
 logger = logging.getLogger(__name__)
+
+MASSIVE_API_KEY = os.getenv("MASSIVE_API_KEY")
 
 def calc_rsi(series: pd.Series, periods: int = 14) -> pd.Series:
     delta = series.diff()
@@ -31,6 +36,57 @@ def calculate_sector_beta(ticker_returns: pd.Series, benchmark_returns: pd.Serie
         return 1.0
     return cov / var
 
+def fetch_massive_candles(ticker: str, multiplier: int, timespan: str, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+    """
+    Fetches historical candles from Massive (Polygon.io) API.
+    multiplier: integer (e.g., 15)
+    timespan: 'minute', 'hour', 'day'
+    """
+    if not MASSIVE_API_KEY:
+        logger.warning("MASSIVE_API_KEY missing. Cannot fetch candles.")
+        return pd.DataFrame()
+        
+    start_str = start_dt.strftime('%Y-%m-%d')
+    end_str = end_dt.strftime('%Y-%m-%d')
+    
+    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{start_str}/{end_str}"
+    params = {
+        'adjusted': 'true',
+        'sort': 'asc',
+        'apiKey': MASSIVE_API_KEY
+    }
+    
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            if resp.status_code == 429:
+                logger.warning(f"Rate limited by Massive API. Retrying in {2**attempt}s...")
+                time.sleep(2**attempt)
+                continue
+                
+            resp.raise_for_status()
+            data = resp.json()
+            
+            if data.get('resultsCount', 0) == 0 or 'results' not in data:
+                return pd.DataFrame()
+                
+            results = data['results']
+            df = pd.DataFrame({
+                'Close': [r['c'] for r in results],
+                'Volume': [r['v'] for r in results],
+                'Timestamp': [r['t'] for r in results]
+            })
+            # Convert milliseconds Unix to DatetimeIndex
+            df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms', utc=True)
+            df.set_index('Timestamp', inplace=True)
+            return df
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch Massive candles for {ticker}: {e}")
+            return pd.DataFrame()
+            
+    return pd.DataFrame()
+
 def build_features(
     ticker: str, 
     nlp_data: dict, 
@@ -41,30 +97,16 @@ def build_features(
     nlp_data: {'decayed_sentiment': float, 'catalyst_category': str}
     """
     try:
-        # Fetch 15m data for the stock
-        stock = yf.Ticker(ticker)
-        # 15m data max period is 60d
-        hist_15m = stock.history(period="5d", interval="15m")
-        
-        # Fetch IWM (benchmark) 15m data
-        iwm = yf.Ticker("IWM")
-        iwm_15m = iwm.history(period="5d", interval="15m")
-        
-        # Lookahead Guard: Ensure no data past guard time is used
+        current_time = datetime.now(timezone.utc)
         if lookahead_guard_time:
-            # Timezone handling
-            if hist_15m.index.tz is None:
-                hist_15m.index = hist_15m.index.tz_localize('UTC')
-            if iwm_15m.index.tz is None:
-                iwm_15m.index = iwm_15m.index.tz_localize('UTC')
-                
-            # Filter strictly BEFORE or AT guard time
-            hist_15m = hist_15m[hist_15m.index <= lookahead_guard_time]
-            iwm_15m = iwm_15m[iwm_15m.index <= lookahead_guard_time]
+            current_time = lookahead_guard_time
             
-            if len(hist_15m) == 0:
-                logger.warning(f"[{ticker}] No data available before guard time {lookahead_guard_time}. Possible lookahead leak prevented.")
-                return {}
+        start_15m = current_time - timedelta(days=5)
+        start_daily = current_time - timedelta(days=60)
+        
+        # Fetch 15m data for the stock and IWM (benchmark)
+        hist_15m = fetch_massive_candles(ticker, 15, 'minute', start_15m, current_time)
+        iwm_15m = fetch_massive_candles('IWM', 15, 'minute', start_15m, current_time)
                 
         if len(hist_15m) < 15: # Need enough data for RSI and momentum
             logger.warning(f"[{ticker}] Not enough 15m candles to build features.")
@@ -72,16 +114,17 @@ def build_features(
 
         # Align indexes
         hist_15m, iwm_15m = hist_15m.align(iwm_15m, join='inner', axis=0)
+        
+        if hist_15m.empty or iwm_15m.empty:
+            logger.warning(f"[{ticker}] Failed to align 15m candles with IWM.")
+            return {}
 
         # 1. rvol_15m (15-minute Relative Volume)
-        # Using 5-day average volume for the same 15-minute bucket could be complex.
-        # Approximation: current volume / average 15m volume over last 5 days
         avg_15m_vol = hist_15m['Volume'].iloc[:-1].mean()
         curr_15m_vol = hist_15m['Volume'].iloc[-1]
         rvol_15m = curr_15m_vol / avg_15m_vol if avg_15m_vol > 0 else 1.0
         
         # 2. momentum_1h (P_t / P_{t-4} - 1)
-        # 4 bars of 15m = 1 hour
         p_t = hist_15m['Close'].iloc[-1]
         p_t_4 = hist_15m['Close'].iloc[-5] if len(hist_15m) >= 5 else hist_15m['Close'].iloc[0]
         momentum_1h = (p_t / p_t_4) - 1.0
@@ -96,26 +139,8 @@ def build_features(
         rsi_14 = rsi_series.iloc[-1]
         
         # 4. sector_beta (30-day rolling Beta)
-        # We need daily data for a proper 30-day beta
-        hist_daily = stock.history(period="2mo", interval="1d")
-        iwm_daily = iwm.history(period="2mo", interval="1d")
-        
-        if lookahead_guard_time:
-            # We must use guard time's date for daily cutoff to prevent leak
-            cutoff_date = pd.to_datetime(lookahead_guard_time.date())
-            # yfinance index tz handling
-            if hist_daily.index.tz is not None:
-                cutoff_date_tz = cutoff_date.tz_localize(hist_daily.index.tz)
-            else:
-                cutoff_date_tz = cutoff_date
-            
-            hist_daily = hist_daily[hist_daily.index < cutoff_date_tz] # Strict less than to only use PAST days
-            
-            if iwm_daily.index.tz is not None:
-                cutoff_date_iwm = cutoff_date.tz_localize(iwm_daily.index.tz)
-            else:
-                cutoff_date_iwm = cutoff_date
-            iwm_daily = iwm_daily[iwm_daily.index < cutoff_date_iwm]
+        hist_daily = fetch_massive_candles(ticker, 1, 'day', start_daily, current_time)
+        iwm_daily = fetch_massive_candles('IWM', 1, 'day', start_daily, current_time)
             
         ticker_returns = hist_daily['Close'].pct_change().dropna()
         bm_returns = iwm_daily['Close'].pct_change().dropna()
@@ -133,7 +158,6 @@ def build_features(
         rag_historical_win_rate = rag_metrics.get('win_rate', 0.5)
         
         # 7. One-hot encoding categories manually for the dict
-        # In a real pipeline, sklearn's OneHotEncoder is used, but dict is easier for single rows
         cats = [e.value for e in CatalystType]
         encoded_cats = {f"cat_{c}": 1 if c == cat_enum else 0 for c in cats}
         
