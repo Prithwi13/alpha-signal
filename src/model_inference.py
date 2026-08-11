@@ -41,10 +41,18 @@ def predict_alpha_probability(features_df: pd.DataFrame) -> pd.DataFrame:
             features_df['sentiment_momentum_interaction'] = features_df['decayed_sentiment'] * features_df['momentum_1h']
             feature_cols.append('sentiment_momentum_interaction')
     
-    X = features_df[feature_cols]
-    
     # Fill any remaining NaNs with 0
-    X = X.fillna(0.0)
+    features_df = features_df.fillna(0.0)
+    
+    # Ensure exact column order and presence based on what the model learned
+    if hasattr(model, 'feature_names_in_'):
+        expected_cols = model.feature_names_in_
+        for col in expected_cols:
+            if col not in features_df.columns:
+                features_df[col] = 0.0
+        X = features_df[expected_cols]
+    else:
+        X = features_df[feature_cols]
     
     try:
         preds = model.predict(X)

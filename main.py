@@ -6,6 +6,12 @@ import pandas as pd
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
+# Fix macOS segmentation fault caused by joblib/loky and OpenMP multiprocessing in XGBoost/LightGBM
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['LOKY_MAX_CPU_COUNT'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+
 # Load environment variables from .env if present
 load_dotenv()
 
@@ -138,9 +144,27 @@ def main():
     features_df = assemble_feature_matrix(candidates_with_nlp)
     
     if features_df.empty:
-        logger.info("Feature builder returned empty matrix.")
-        notify_empty_signals()
-        return
+        if is_simulation:
+            logger.info("Simulation: Injecting fake features to bypass Polygon API key requirement...")
+            features_df = pd.DataFrame([{
+                'ticker': 'SIM_BIO',
+                'rvol_15m': 5.0,
+                'momentum_1h': 0.1,
+                'rsi_14': 75.0,
+                'decayed_sentiment': 0.9,
+                'rag_historical_win_rate': 0.8,
+                'sector_beta': 1.2,
+                'excess_momentum': 0.05,
+                'target_class': 1
+            }])
+            # Add catalyst one-hot encodings
+            from src.nlp_engine import CatalystType
+            for c in CatalystType:
+                features_df[f"cat_{c.value}"] = 1 if c.value == 'FDA_APPROVAL' else 0
+        else:
+            logger.info("Feature builder returned empty matrix.")
+            notify_empty_signals()
+            return
         
     # 5. Model Inference
     logger.info("Running XGBoost alpha predictions...")
