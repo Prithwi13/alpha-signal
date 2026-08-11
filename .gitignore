@@ -1,4 +1,6 @@
+# git push -u origin main.env
 .env
 venv/
 __pycache__/
-.env
+logs/
+data/

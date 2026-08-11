@@ -128,7 +128,7 @@ def build_features(
             return {}
 
         # 1. rvol_15m (15-minute Relative Volume)
-        avg_15m_vol = hist_15m['Volume'].iloc[:-1].mean()
+        avg_15m_vol = hist_15m['Volume'].iloc[:-1].ewm(span=100).mean().iloc[-1]
         curr_15m_vol = hist_15m['Volume'].iloc[-1]
         rvol_15m = curr_15m_vol / avg_15m_vol if avg_15m_vol > 0 else 1.0
         

@@ -71,12 +71,12 @@ def get_stocks_in_play(universe_list: list[str] = None) -> pd.DataFrame:
             if not (50_000_000 <= market_cap <= 2_000_000_000):
                 continue
                 
-            # Filter 4: RVOL > 2.5
+            # Filter 4: RVOL > 0.05 (Premarket volume > 5% of daily ADV is significant)
             if adv_10d == 0:
                 continue
-            rvol = premarket_volume / (adv_10d / 39) # Normalizing ADV to typical 390 min trading day chunks (39 * 10min)
+            rvol = premarket_volume / adv_10d
             
-            if rvol >= 2.5:
+            if rvol >= 0.05:
                 candidates.append({
                     'ticker': ticker_symbol,
                     'adv': adv_10d,

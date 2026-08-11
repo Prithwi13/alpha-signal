@@ -32,6 +32,15 @@ def predict_alpha_probability(features_df: pd.DataFrame) -> pd.DataFrame:
     exclude_cols = ['ticker', 'timestamp', 'target_class']
     feature_cols = [c for c in features_df.columns if c not in exclude_cols]
     
+    # Add the engineered features exactly as they were in quant_pipeline.py
+    if not features_df.empty:
+        if 'rvol_15m' in features_df.columns and 'momentum_1h' in features_df.columns:
+            features_df['vol_momentum_interaction'] = features_df['rvol_15m'] * features_df['momentum_1h']
+            feature_cols.append('vol_momentum_interaction')
+        if 'decayed_sentiment' in features_df.columns and 'momentum_1h' in features_df.columns:
+            features_df['sentiment_momentum_interaction'] = features_df['decayed_sentiment'] * features_df['momentum_1h']
+            feature_cols.append('sentiment_momentum_interaction')
+    
     X = features_df[feature_cols]
     
     # Fill any remaining NaNs with 0

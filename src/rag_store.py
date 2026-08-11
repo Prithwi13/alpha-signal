@@ -60,14 +60,29 @@ def query_catalyst_history(ticker: str, catalyst_enum: str, lookback_count: int 
         query_text = f"Catalyst type: {catalyst_enum}"
         query_vector = embeddings.embed_query(query_text)
         
-        # Query Pinecone
-        response = index.query(
+        # Stage 1: Try to find ticker-specific catalyst history first
+        response_specific = index.query(
             vector=query_vector,
             top_k=lookback_count,
-            include_metadata=True
+            include_metadata=True,
+            filter={"ticker": {"$eq": ticker}}
         )
         
-        matches = response.get('matches', [])
+        matches = response_specific.get('matches', [])
+        
+        # Stage 2: If we don't have enough history for this specific ticker, fill the rest with global history
+        if len(matches) < lookback_count:
+            response_global = index.query(
+                vector=query_vector,
+                top_k=lookback_count - len(matches),
+                include_metadata=True
+            )
+            # Add global matches, avoiding duplicates
+            existing_ids = {m['id'] for m in matches}
+            for gm in response_global.get('matches', []):
+                if gm['id'] not in existing_ids:
+                    matches.append(gm)
+                    
         if not matches:
             return {"avg_1h_return": 0.0, "avg_4h_return": 0.0, "win_rate": 0.5, "count": 0}
             

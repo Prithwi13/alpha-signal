@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 import requests
+import pandas as pd
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
@@ -60,16 +61,29 @@ def fetch_recent_news(ticker: str) -> list:
         return []
 
 def main():
-    logger.info("Starting Systematic Alpha Signal Engine (SASE) Pipeline...")
+    is_simulation = "--simulate" in sys.argv
+    logger.info(f"Starting Systematic Alpha Signal Engine (SASE) Pipeline... [Simulation: {is_simulation}]")
     
     # 1. Initialize DBs
     init_pinecone()
     
     # 2. Screening
-    # For a real run, this would be loaded from data/universe.csv or a live source.
-    # We will use a reasonably large sample for the daily scan.
-    logger.info("Screening dynamic universe of all US equities...")
-    stocks_in_play = get_stocks_in_play(None)
+    if is_simulation:
+        logger.info("SIMULATION MODE: Injecting fake quantitative pre-market data to bypass screener.")
+        # Inject realistic data that passes all strict filters
+        fake_data = [{
+            'ticker': 'SIM_BIO',
+            'adv': 1500000.0,
+            'current_volume': 500000.0,
+            'gap_pct': 0.15,  # 15% Gap
+            'rvol': 3.5,      # > 2.5
+            'market_cap': 150_000_000,
+            'price': 12.50
+        }]
+        stocks_in_play = pd.DataFrame(fake_data)
+    else:
+        logger.info("Screening dynamic universe of all US equities...")
+        stocks_in_play = get_stocks_in_play(None)
     
     if stocks_in_play.empty:
         logger.info("No Stocks in Play found today.")
@@ -83,7 +97,16 @@ def main():
     # 3. NLP Engine
     for idx, row in stocks_in_play.iterrows():
         ticker = row['ticker']
-        news = fetch_recent_news(ticker)
+        
+        if is_simulation:
+            # Inject fake, highly impactful news to test Langchain & FinBERT
+            news = [{
+                'ticker': ticker,
+                'headline': f"{ticker} Receives FDA Fast Track Designation for Revolutionary Cancer Treatment, Sending Shares Soaring",
+                'timestamp': datetime.now(timezone.utc) - timedelta(minutes=15)
+            }]
+        else:
+            news = fetch_recent_news(ticker)
         
         if not news:
             logger.info(f"No recent news for {ticker}, skipping NLP.")
@@ -95,7 +118,6 @@ def main():
             continue
             
         # Score the latest headline or batch of headlines
-        # For simplicity, we just score the most recent one
         latest_news = [news[0]]
         nlp_df = score_news_headlines(latest_news)
         
@@ -124,7 +146,14 @@ def main():
     logger.info("Running XGBoost alpha predictions...")
     predictions_df = predict_alpha_probability(features_df)
     
-    # 6. Store significant events for future RAG (Run post-market ideally, but we store here)
+    # 6. Logging the Results for Deep Analysis
+    os.makedirs('logs', exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = f"logs/sase_run_{timestamp}.csv"
+    predictions_df.to_csv(log_file, index=False)
+    logger.info(f"💾 Step-by-step AI Analysis saved to: {log_file}")
+    
+    # 7. Store significant events for future RAG (Run post-market ideally, but we store here)
     for idx, row in predictions_df.iterrows():
         # Store if we had a specific catalyst
         cand_data = next((c for c in candidates_with_nlp if c['ticker'] == row['ticker']), None)
@@ -137,10 +166,14 @@ def main():
                 return_4h=0.0
             )
     
-    # 7. Notify
+    # 8. Notify
     logger.info("Generating morning report...")
+    if is_simulation:
+        # In simulation, we force a high probability so the Discord webhook always fires
+        predictions_df['pred_prob'] = 0.99
     generate_morning_report(predictions_df)
     logger.info("Pipeline execution completed successfully.")
 
 if __name__ == "__main__":
     main()
+

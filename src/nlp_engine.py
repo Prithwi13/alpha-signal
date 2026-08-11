@@ -113,6 +113,11 @@ def score_news_headlines(headlines: list[dict]) -> pd.DataFrame:
         # Prevent negative time (if pub_time is somehow in future)
         t_hours = max(0, t_hours)
         
+        # Weekend time bridge: if news spans over the weekend, subtract 48 hours
+        # Check if pub_time is before the weekend and current_time is after the weekend
+        if pub_time.weekday() in [4, 5, 6] and current_time.weekday() in [0, 1, 2]:
+            t_hours = max(0, t_hours - 48.0)
+        
         # Decay formula: S_decayed = S * exp(- (ln(2)/3.0) * t)
         half_life = 3.0
         decay_factor = math.exp(-(math.log(2) / half_life) * t_hours)
