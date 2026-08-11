@@ -50,10 +50,11 @@ def get_stocks_in_play(universe_list: list[str] = None) -> pd.DataFrame:
         universe_list = get_dynamic_universe()
         logger.info(f"Dynamically gathered {len(universe_list)} tickers to screen.")
         
-    # To avoid memory / timeout issues, we cap the daily scan to 800 random tickers
-    batch = universe_list[:800]
+    # We will bulk download the ENTIRE universe (3000+ tickers).
+    # yfinance threading will fetch this efficiently.
+    batch = universe_list
     
-    logger.info(f"Bulk downloading daily history for {len(batch)} tickers...")
+    logger.info(f"Bulk downloading daily history for the entire market ({len(batch)} tickers)...")
     try:
         daily_data = yf.download(batch, period="1mo", interval="1d", group_by="ticker", threads=True, progress=False)
         intraday_data = yf.download(batch, period="1d", interval="1m", prepost=True, group_by="ticker", threads=True, progress=False)
@@ -105,19 +106,40 @@ def get_stocks_in_play(universe_list: list[str] = None) -> pd.DataFrame:
             
     logger.info(f"Pre-filter complete. Found {len(pre_filtered_tickers)} candidates. Checking Market Cap...")
     
-    # 2. Only check `.info` for the few stocks that passed the pre-filter
+    # 2. Only check Market Cap using Finnhub for the few stocks that passed the pre-filter
+    FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
+    import time
+    
     for cand in pre_filtered_tickers:
         ticker_symbol = cand['ticker']
         try:
-            ticker = yf.Ticker(ticker_symbol)
-            # Use fast_info to avoid HTTP 429 if possible, fallback to info
-            try:
-                market_cap = ticker.fast_info['marketCap']
-                current_price = ticker.fast_info['lastPrice']
-            except:
-                info = ticker.info
-                market_cap = info.get('marketCap', 0)
-                current_price = info.get('regularMarketPrice') or info.get('currentPrice', 0)
+            # We already have price from our intraday download
+            current_price = cand['current_volume'] # wait, need price, we will just use intraday close
+            # We didn't save current price in cand, let's just fetch it from Finnhub quote or use Finnhub profile2
+            # Finnhub profile2 gives market cap in millions
+            url = f"https://finnhub.io/api/v1/stock/profile2"
+            params = {'symbol': ticker_symbol, 'token': FINNHUB_API_KEY}
+            resp = requests.get(url, params=params)
+            
+            if resp.status_code == 429:
+                logger.warning("Finnhub rate limit hit. Sleeping for 1 minute.")
+                time.sleep(60)
+                resp = requests.get(url, params=params)
+                
+            resp.raise_for_status()
+            profile_data = resp.json()
+            
+            # marketCapitalization is in Millions of USD
+            market_cap_millions = profile_data.get('marketCapitalization', 0)
+            market_cap = market_cap_millions * 1_000_000
+            
+            # Fetch current price via Finnhub quote to be safe, or just use the YF price we had
+            quote_url = f"https://finnhub.io/api/v1/quote"
+            quote_resp = requests.get(quote_url, params=params)
+            if quote_resp.status_code == 200:
+                current_price = quote_resp.json().get('c', 0)
+            else:
+                current_price = 0
                 
             if not (50_000_000 <= market_cap <= 2_000_000_000):
                 continue
@@ -127,6 +149,7 @@ def get_stocks_in_play(universe_list: list[str] = None) -> pd.DataFrame:
             cand['market_cap'] = market_cap
             cand['price'] = current_price
             candidates.append(cand)
+            time.sleep(1) # Finnhub free tier limit is 60 calls/min
             
         except Exception as e:
             logger.debug(f"Failed to process info for {ticker_symbol}: {e}")
