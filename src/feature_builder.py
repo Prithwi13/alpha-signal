@@ -56,6 +56,14 @@ def fetch_massive_candles(ticker: str, multiplier: int, timespan: str, start_dt:
         'apiKey': MASSIVE_API_KEY
     }
     
+    # -------------------------------------------------------------
+    # FREE TIER RATE LIMIT GUARD: 5 requests per minute
+    # We sleep 13 seconds before EVERY API call to guarantee 
+    # we never exceed the limit of 5 requests per 60 seconds.
+    # -------------------------------------------------------------
+    logger.info(f"Rate Limit Guard: Sleeping 13s before fetching {ticker}...")
+    time.sleep(13)
+    
     for attempt in range(3):
         try:
             resp = requests.get(url, params=params, timeout=10)
