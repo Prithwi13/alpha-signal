@@ -51,13 +51,42 @@ def get_stocks_in_play(universe_list: list[str] = None) -> pd.DataFrame:
         logger.info(f"Dynamically gathered {len(universe_list)} tickers to screen.")
         
     # We will bulk download the ENTIRE universe (3000+ tickers).
-    # yfinance threading will fetch this efficiently.
+    # To avoid triggering Yahoo Finance's DDoS protection (which causes the "Expecting value" error),
+    # we chunk the requests and use a realistic User-Agent.
     batch = universe_list
     
-    logger.info(f"Bulk downloading daily history for the entire market ({len(batch)} tickers)...")
+    import time
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+    
+    logger.info(f"Chunk downloading daily history for the entire market ({len(batch)} tickers)...")
+    
+    daily_data_frames = []
+    intraday_data_frames = []
+    chunk_size = 200
+    
     try:
-        daily_data = yf.download(batch, period="1mo", interval="1d", group_by="ticker", threads=True, progress=False)
-        intraday_data = yf.download(batch, period="1d", interval="1m", prepost=True, group_by="ticker", threads=True, progress=False)
+        for i in range(0, len(batch), chunk_size):
+            chunk = batch[i:i+chunk_size]
+            logger.info(f"Downloading chunk {i//chunk_size + 1}/{(len(batch)//chunk_size) + 1}...")
+            
+            # Using threads=5 instead of True to prevent flooding
+            d = yf.download(chunk, period="1mo", interval="1d", group_by="ticker", threads=5, session=session, progress=False)
+            i_d = yf.download(chunk, period="1d", interval="1m", prepost=True, group_by="ticker", threads=5, session=session, progress=False)
+            
+            if not d.empty: daily_data_frames.append(d)
+            if not i_d.empty: intraday_data_frames.append(i_d)
+            
+            time.sleep(2) # Brief pause between chunks to respect rate limits
+            
+        if daily_data_frames and intraday_data_frames:
+            daily_data = pd.concat(daily_data_frames, axis=1)
+            intraday_data = pd.concat(intraday_data_frames, axis=1)
+        else:
+            return pd.DataFrame()
+            
     except Exception as e:
         logger.error(f"Bulk download failed: {e}")
         return pd.DataFrame()
